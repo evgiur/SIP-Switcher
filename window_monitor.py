@@ -7,7 +7,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 # --- КОНСТАНТЫ ДЛЯ ПОИСКА ОКНА ---
 PROCESS_NAME = 'sipphone.exe'
 MAIN_WINDOW_CLASS = 'TMainForm'
-TARGET_TITLE = 'Kartina sip phone' # Убедитесь, что заголовок верный
+TARGET_TITLE = 'Kartina sip phone'
 T_MEMO_CLASS = "TMemo"
 TRIGGER_TEXT = "Длительность"
 
@@ -23,6 +23,8 @@ class MonitorThread(QThread):
         self._is_running = True
         self.is_call_active = False
         self.is_process_active = False
+        self.error_count = 0  # Счетчик последовательных ошибок
+        self.max_errors = 5   # Максимальное количество ошибок подряд
 
     def run(self):
         while self._is_running:
@@ -44,15 +46,15 @@ class MonitorThread(QThread):
                             status_memo_found = True
                             break
                     except Exception:
-                        continue # Игнорируем ошибки чтения с отдельных элементов
+                        continue
 
                 # 3. Анализируем состояние звонка
                 if status_memo_found and not self.is_call_active:
                     self.is_call_active = True
-                    self.call_started.emit() # Отправляем сигнал: "Звонок начался!"
+                    self.call_started.emit()
                 elif not status_memo_found and self.is_call_active:
                     self.is_call_active = False
-                    self.call_ended.emit() # Отправляем сигнал: "Звонок закончился!"
+                    self.call_ended.emit()
 
             except Exception:
                 # Окно не найдено или недоступно, сбрасываем состояние звонка
@@ -63,37 +65,55 @@ class MonitorThread(QThread):
             time.sleep(0.5)
 
     def check_process(self):
-        """Проверяет, запущен ли процесс sipphone.exe (ИСПРАВЛЕННАЯ ВЕРСИЯ 2)"""
+        """Проверяет, запущен ли процесс sipphone.exe с улучшенной обработкой ошибок"""
         process_found = False
-        # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        
         try:
-            # Этап 1: Перебираем процессы
+            # Используем более надежный подход с attrs вместо info
             for proc in psutil.process_iter(['name']):
-                # Этап 2: Обрабатываем каждый отдельный процесс
                 try:
-                    if proc.info['name'] == PROCESS_NAME:
+                    # Получаем имя процесса безопасным способом
+                    proc_name = proc.name()
+                    if proc_name == PROCESS_NAME:
                         process_found = True
-                        break # Нашли, выходим из цикла
+                        self.error_count = 0  # Сбрасываем счетчик ошибок при успехе
+                        break
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    # Игнорируем процессы, которые уже завершились или к которым нет доступа
+                    # Игнорируем недоступные процессы
                     continue
-        except OSError as e:
-            # Ловим ошибку, если psutil.process_iter() сам по себе не сработал
-            print(f"⚠️  Ошибка psutil.process_iter: {e}. Повторная попытка через несколько секунд...")
-            # В случае сбоя возвращаем предыдущее известное состояние, чтобы избежать ложных срабатываний
+                    
+        except (OSError, WindowsError) as e:
+            # Обработка системных ошибок Windows
+            self.error_count += 1
+            
+            if self.error_count <= 3:
+                # Первые несколько ошибок только логируем
+                print(f"⚠️  Временная ошибка psutil ({self.error_count}/{self.max_errors}): {e}")
+            elif self.error_count == self.max_errors:
+                # После 5 ошибок подряд выводим предупреждение
+                print(f"❌ Критическая ошибка psutil после {self.max_errors} попыток. Возможны проблемы с мониторингом.")
+            
+            # Возвращаем последнее известное состояние для стабильности
             return self.is_process_active
-        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
+        except Exception as e:
+            # Ловим любые другие непредвиденные ошибки
+            print(f"❌ Неожиданная ошибка в check_process: {type(e).__name__}: {e}")
+            return self.is_process_active
 
+        # Обновляем состояние процесса
         if process_found:
             if not self.is_process_active:
                 self.is_process_active = True
                 self.process_running.emit()
+                print("✅ Процесс sipphone.exe обнаружен")
             return True
         else:
             if self.is_process_active:
                 self.is_process_active = False
-                self.is_call_active = False # Если процесс упал, звонок тоже завершен
-                self.process_stopped.emit() # Отправляем сигнал: "Процесс остановлен!"
+                self.is_call_active = False
+                self.process_stopped.emit()
+                print("❌ Процесс sipphone.exe остановлен")
             return False
 
     def stop(self):
