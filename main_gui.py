@@ -44,6 +44,11 @@ class SipManagerApp(QMainWindow):
         self.elapsed_seconds = 0
         self.answer_time = None  # Время ответа на звонок
         
+        # Таймер для мигания
+        self.blink_timer = QTimer()
+        self.blink_timer.timeout.connect(self.blink_answer_label)
+        self.blink_state = False
+        
         # Процесс sipphone для управления громкостью
         self.sipphone_session = None
 
@@ -73,18 +78,14 @@ class SipManagerApp(QMainWindow):
         
         # Направление звонка
         self.direction_label = QLabel("Направление: —")
-        self.direction_label.setFont(QFont("Arial", 10))
+        self.direction_label.setFont(QFont("Arial", 13, QFont.Bold))
+        self.direction_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.direction_label)
         
-        # Секундомер
-        self.timer_label = QLabel("Ожидание: 00:00")
-        self.timer_label.setFont(QFont("Arial", 14, QFont.Bold))
-        self.timer_label.setStyleSheet("color: #2196F3;")
-        status_layout.addWidget(self.timer_label)
-        
         # Время ответа
-        self.answer_time_label = QLabel("Время ответа: —")
-        self.answer_time_label.setFont(QFont("Arial", 9))
+        self.answer_time_label = QLabel("")
+        self.answer_time_label.setFont(QFont("Arial", 11))
+        self.answer_time_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.answer_time_label)
         
         status_group.setLayout(status_layout)
@@ -208,9 +209,11 @@ class SipManagerApp(QMainWindow):
             for session in sessions:
                 if session.Process and session.Process.name() == "sipphone.exe":
                     volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    volume.SetMute(1, None)
-                    self.sipphone_session = session
-                    print("🔇 Звук sipphone.exe заглушен")
+                    current_mute = volume.GetMute()
+                    if not current_mute:  # Только если еще не заглушен
+                        volume.SetMute(1, None)
+                        self.sipphone_session = session
+                        print("🔇 Звук sipphone.exe заглушен")
                     return True
         except Exception as e:
             print(f"⚠️ Не удалось заглушить sipphone: {e}")
@@ -231,18 +234,45 @@ class SipManagerApp(QMainWindow):
         """Запуск секундомера"""
         self.elapsed_seconds = 0
         self.answer_time = None
+        self.blink_timer.stop()  # Останавливаем мигание если было
         self.timer.start(1000)  # Обновление каждую секунду
 
     def stop_timer(self):
         """Остановка секундомера"""
         self.timer.stop()
+        self.blink_timer.stop()
 
     def update_timer(self):
         """Обновление отображения секундомера"""
         self.elapsed_seconds += 1
-        minutes = self.elapsed_seconds // 60
-        seconds = self.elapsed_seconds % 60
-        self.timer_label.setText(f"Ожидание: {minutes:02d}:{seconds:02d}")
+        
+        # Определяем цвет и нужно ли мигание
+        if self.elapsed_seconds <= 12:
+            color = "#4CAF50"  # Зеленый
+            self.blink_timer.stop()
+            self.answer_time_label.setText(f"Время ожидания: {self.elapsed_seconds} сек")
+            self.answer_time_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        elif self.elapsed_seconds <= 15:
+            color = "#F44336"  # Красный
+            # Запускаем мигание если еще не запущено
+            if not self.blink_timer.isActive():
+                self.blink_timer.start(500)  # Мигание каждые 500мс
+            self.answer_time_label.setText(f"Время ожидания: {self.elapsed_seconds} сек")
+        else:
+            # После 15 секунд продолжаем красным без мигания
+            color = "#F44336"
+            self.blink_timer.stop()
+            self.answer_time_label.setText(f"Время ожидания: {self.elapsed_seconds} сек")
+            self.answer_time_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+    
+    def blink_answer_label(self):
+        """Мигание надписи времени ответа"""
+        self.blink_state = not self.blink_state
+        if self.blink_state:
+            self.answer_time_label.setStyleSheet("color: #F44336; font-weight: bold;")  # Красный
+        else:
+            self.answer_time_label.setStyleSheet("color: transparent; font-weight: bold;")  # Прозрачный
+        self.answer_time_label.setText(f"Время ожидания: {self.elapsed_seconds} сек")
 
     def play_alert(self):
         if self.alert_sound:
@@ -329,17 +359,38 @@ class SipManagerApp(QMainWindow):
         """Обработка входящего вызова"""
         print(f"GUI: Входящий вызов - {direction}")
         
-        # Обновляем GUI
+        # КРИТИЧНО: Сначала глушим sipphone
+        self.mute_sipphone()
+        
+        # Небольшая задержка для гарантии применения mute
+        import time
+        time.sleep(0.05)
+        
+        # Затем включаем кастомный рингтон
+        self.play_ringtone()
+        
+        # Обновляем GUI с цветовой индикацией направления
         self.update_status("ringing", "Входящий вызов...")
-        self.direction_label.setText(f"Направление: {direction}")
-        self.timer_label.setStyleSheet("color: #FF9800;")  # Оранжевый цвет
+        
+        # Устанавливаем цвет в зависимости от направления
+        if direction == "tv_tech":
+            color = "#4CAF50"  # Зеленый
+            direction_text = "tv_tech"
+        elif direction == "tv_order":
+            color = "#F44336"  # Красный
+            direction_text = "tv_order"
+        elif direction == "tv_pay_tech":
+            color = "#2196F3"  # Синий (можно изменить при необходимости)
+            direction_text = "tv_pay_tech"
+        else:
+            color = "#9E9E9E"  # Серый для неизвестного
+            direction_text = direction if direction else "Неизвестно"
+        
+        self.direction_label.setText(f"Направление: {direction_text}")
+        self.direction_label.setStyleSheet(f"color: {color}; font-weight: bold;")
         
         # Запускаем секундомер
         self.start_timer()
-        
-        # Глушим sipphone и включаем кастомный рингтон
-        self.mute_sipphone()
-        self.play_ringtone()
         
         # Активируем окно
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
@@ -354,15 +405,17 @@ class SipManagerApp(QMainWindow):
         self.stop_ringtone()
         self.unmute_sipphone()
         
-        # Фиксируем время ответа
+        # Фиксируем время ответа в секундах
         self.stop_timer()
-        self.answer_time = datetime.now().strftime("%H:%M:%S")
-        minutes = self.elapsed_seconds // 60
-        seconds = self.elapsed_seconds % 60
-        self.answer_time_label.setText(f"Время ответа: {self.answer_time} (ожидание: {minutes:02d}:{seconds:02d})")
         
-        # Обновляем цвет таймера
-        self.timer_label.setStyleSheet("color: #4CAF50;")  # Зеленый цвет
+        # Определяем цвет в зависимости от времени ответа
+        if self.elapsed_seconds <= 12:
+            color = "#4CAF50"  # Зеленый
+        else:
+            color = "#F44336"  # Красный (12-15 и больше)
+        
+        self.answer_time_label.setText(f"Время ответа: {self.elapsed_seconds} сек")
+        self.answer_time_label.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def on_call_started(self):
         """Активный разговор"""
@@ -380,10 +433,10 @@ class SipManagerApp(QMainWindow):
         self.stop_timer()
         
         # Сбрасываем отображение
-        self.timer_label.setText("Ожидание: 00:00")
-        self.timer_label.setStyleSheet("color: #2196F3;")
         self.direction_label.setText("Направление: —")
-        self.answer_time_label.setText("Время ответа: —")
+        self.direction_label.setStyleSheet("")
+        self.answer_time_label.setText("")
+        self.answer_time_label.setStyleSheet("")
         
         if audio_manager.set_device_from_config('speakers'):
             self.update_status("speakers", "Ожидание звонка\n(Динамики)")
@@ -403,6 +456,8 @@ class SipManagerApp(QMainWindow):
     def closeEvent(self, event):
         self.stop_ringtone()
         self.unmute_sipphone()
+        self.timer.stop()
+        self.blink_timer.stop()
         self.monitor_thread.stop()
         self.monitor_thread.wait() 
         audio_manager.set_device_from_config('speakers')
