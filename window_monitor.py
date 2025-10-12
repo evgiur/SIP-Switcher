@@ -1,6 +1,7 @@
 # window_monitor.py
 import time
-import psutil
+import ctypes
+from ctypes import wintypes
 from pywinauto.application import Application
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -11,8 +12,26 @@ TARGET_TITLE = 'Kartina sip phone'
 T_MEMO_CLASS = "TMemo"
 TRIGGER_TEXT = "Длительность"
 
+# Windows API константы
+TH32CS_SNAPPROCESS = 0x00000002
+INVALID_HANDLE_VALUE = -1
+
+# Структуры для Windows API
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', wintypes.DWORD),
+        ('cntUsage', wintypes.DWORD),
+        ('th32ProcessID', wintypes.DWORD),
+        ('th32DefaultHeapID', ctypes.POINTER(wintypes.ULONG)),
+        ('th32ModuleID', wintypes.DWORD),
+        ('cntThreads', wintypes.DWORD),
+        ('th32ParentProcessID', wintypes.DWORD),
+        ('pcPriClassBase', wintypes.LONG),
+        ('dwFlags', wintypes.DWORD),
+        ('szExeFile', wintypes.CHAR * 260)
+    ]
+
 class MonitorThread(QThread):
-    # Сигналы, которые поток будет отправлять в основной GUI
     call_started = pyqtSignal()
     call_ended = pyqtSignal()
     process_stopped = pyqtSignal()
@@ -23,8 +42,13 @@ class MonitorThread(QThread):
         self._is_running = True
         self.is_call_active = False
         self.is_process_active = False
-        self.error_count = 0  # Счетчик последовательных ошибок
-        self.max_errors = 5   # Максимальное количество ошибок подряд
+        
+        # Загружаем Windows API функции
+        self.kernel32 = ctypes.windll.kernel32
+        self.CreateToolhelp32Snapshot = self.kernel32.CreateToolhelp32Snapshot
+        self.Process32First = self.kernel32.Process32First
+        self.Process32Next = self.kernel32.Process32Next
+        self.CloseHandle = self.kernel32.CloseHandle
 
     def run(self):
         while self._is_running:
@@ -57,7 +81,7 @@ class MonitorThread(QThread):
                     self.call_ended.emit()
 
             except Exception:
-                # Окно не найдено или недоступно, сбрасываем состояние звонка
+                # Окно не найдено или недоступно
                 if self.is_call_active:
                     self.is_call_active = False
                     self.call_ended.emit()
@@ -65,40 +89,43 @@ class MonitorThread(QThread):
             time.sleep(0.5)
 
     def check_process(self):
-        """Проверяет, запущен ли процесс sipphone.exe с улучшенной обработкой ошибок"""
+        """
+        Проверяет наличие процесса через нативный Windows API.
+        Более надежный метод, чем psutil для этой задачи.
+        """
         process_found = False
         
         try:
-            # Используем более надежный подход с attrs вместо info
-            for proc in psutil.process_iter(['name']):
-                try:
-                    # Получаем имя процесса безопасным способом
-                    proc_name = proc.name()
-                    if proc_name == PROCESS_NAME:
-                        process_found = True
-                        self.error_count = 0  # Сбрасываем счетчик ошибок при успехе
-                        break
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    # Игнорируем недоступные процессы
-                    continue
-                    
-        except (OSError, WindowsError) as e:
-            # Обработка системных ошибок Windows
-            self.error_count += 1
+            # Создаем снимок всех процессов
+            snapshot = self.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
             
-            if self.error_count <= 3:
-                # Первые несколько ошибок только логируем
-                print(f"⚠️  Временная ошибка psutil ({self.error_count}/{self.max_errors}): {e}")
-            elif self.error_count == self.max_errors:
-                # После 5 ошибок подряд выводим предупреждение
-                print(f"❌ Критическая ошибка psutil после {self.max_errors} попыток. Возможны проблемы с мониторингом.")
+            if snapshot == INVALID_HANDLE_VALUE:
+                print("❌ Не удалось создать снимок процессов")
+                return self.is_process_active
             
-            # Возвращаем последнее известное состояние для стабильности
-            return self.is_process_active
-            
+            try:
+                # Инициализируем структуру
+                pe32 = PROCESSENTRY32()
+                pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
+                
+                # Получаем первый процесс
+                if self.Process32First(snapshot, ctypes.byref(pe32)):
+                    while True:
+                        # Проверяем имя процесса
+                        process_name = pe32.szExeFile.decode('utf-8', errors='ignore').lower()
+                        if process_name == PROCESS_NAME.lower():
+                            process_found = True
+                            break
+                        
+                        # Переходим к следующему процессу
+                        if not self.Process32Next(snapshot, ctypes.byref(pe32)):
+                            break
+            finally:
+                # Обязательно закрываем handle
+                self.CloseHandle(snapshot)
+                
         except Exception as e:
-            # Ловим любые другие непредвиденные ошибки
-            print(f"❌ Неожиданная ошибка в check_process: {type(e).__name__}: {e}")
+            print(f"❌ Ошибка при проверке процесса: {type(e).__name__}: {e}")
             return self.is_process_active
 
         # Обновляем состояние процесса
@@ -106,14 +133,14 @@ class MonitorThread(QThread):
             if not self.is_process_active:
                 self.is_process_active = True
                 self.process_running.emit()
-                print("✅ Процесс sipphone.exe обнаружен")
+                print(f"✅ Процесс {PROCESS_NAME} обнаружен")
             return True
         else:
             if self.is_process_active:
                 self.is_process_active = False
                 self.is_call_active = False
                 self.process_stopped.emit()
-                print("❌ Процесс sipphone.exe остановлен")
+                print(f"❌ Процесс {PROCESS_NAME} остановлен")
             return False
 
     def stop(self):
