@@ -6,9 +6,10 @@ import traceback
 import warnings
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QComboBox, QPushButton, QGroupBox, QMessageBox, QFileDialog)
+                             QLabel, QComboBox, QPushButton, QGroupBox, QMessageBox, QFileDialog, QCheckBox,
+                             QSystemTrayIcon, QMenu, QAction)
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPixmap, QFont
+from PyQt5.QtGui import QPixmap, QFont, QIcon
 import pygame
 from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 
@@ -37,6 +38,7 @@ class SipManagerApp(QMainWindow):
         self.alert_sound = self.load_sound(get_resource_path('sounds/alert.wav'))
         self.ringtone = None  # Кастомный рингтон
         self.ringtone_channel = None  # Канал для воспроизведения рингтона
+        self.is_ringtone_testing = False  # Флаг тестирования рингтона
         
         # Секундомер
         self.timer = QTimer()
@@ -59,6 +61,7 @@ class SipManagerApp(QMainWindow):
         self.init_ui()
         self.load_config()
         self.populate_devices()
+        self.init_tray()
         
         self.start_monitoring()
 
@@ -131,6 +134,17 @@ class SipManagerApp(QMainWindow):
         ringtone_group.setLayout(ringtone_layout)
         self.layout.addWidget(ringtone_group)
         
+        # --- Секция дополнительных настроек ---
+        settings_group = QGroupBox("Дополнительные настройки")
+        settings_layout = QVBoxLayout()
+        
+        self.alert_checkbox = QCheckBox("Включить аварийный сигнал при закрытии SIP-телефона")
+        self.alert_checkbox.setChecked(False)  # По умолчанию выключено
+        settings_layout.addWidget(self.alert_checkbox)
+        
+        settings_group.setLayout(settings_layout)
+        self.layout.addWidget(settings_group)
+        
         self.layout.addStretch()
 
         # Загрузка иконок
@@ -146,6 +160,56 @@ class SipManagerApp(QMainWindow):
                 print(f"⚠️ Не удалось загрузить иконку: {name}")
         
         self.update_status("disconnected", "SIP-телефон не найден")
+
+    def init_tray(self):
+        """Инициализация системного трея"""
+        # Создаем иконку трея
+        tray_icon_path = get_resource_path('icons/headset.png')
+        if os.path.exists(tray_icon_path):
+            self.tray_icon = QSystemTrayIcon(QIcon(tray_icon_path), self)
+        else:
+            # Если иконки нет, используем стандартную иконку приложения
+            self.tray_icon = QSystemTrayIcon(self)
+        
+        # Создаем контекстное меню для трея
+        tray_menu = QMenu()
+        
+        show_action = QAction("Показать/Скрыть", self)
+        show_action.triggered.connect(self.toggle_window_visibility)
+        tray_menu.addAction(show_action)
+        
+        tray_menu.addSeparator()
+        
+        quit_action = QAction("Выход", self)
+        quit_action.triggered.connect(self.quit_application)
+        tray_menu.addAction(quit_action)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        
+        # Клик по иконке трея показывает/скрывает окно
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        
+        # Показываем иконку в трее
+        self.tray_icon.show()
+        
+        print("✅ Системный трей инициализирован")
+    
+    def on_tray_icon_activated(self, reason):
+        """Обработка клика по иконке трея"""
+        if reason == QSystemTrayIcon.Trigger:  # Одинарный клик
+            self.toggle_window_visibility()
+    
+    def toggle_window_visibility(self):
+        """Переключение видимости окна"""
+        if self.isVisible():
+            self.hide()
+            print("🔽 Окно скрыто в трей")
+        else:
+            self.show()
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+            self.activateWindow()
+            self.raise_()
+            print("🔼 Окно показано из трея")
 
     def load_sound(self, path):
         if os.path.exists(path):
@@ -183,10 +247,34 @@ class SipManagerApp(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить рингтон:\n{e}")
 
     def test_ringtone(self):
-        """Тестирование рингтона"""
+        """Тестирование рингтона (toggle)"""
         if self.ringtone:
-            self.stop_ringtone()
-            self.ringtone_channel = self.ringtone.play()
+            if self.is_ringtone_testing:
+                # Останавливаем воспроизведение
+                self.stop_ringtone()
+                self.is_ringtone_testing = False
+                self.test_ringtone_btn.setText("Тест")
+                print("🔕 Тестирование рингтона остановлено")
+            else:
+                # Запускаем воспроизведение (один раз, без loop)
+                self.stop_ringtone()
+                self.ringtone_channel = self.ringtone.play()
+                self.is_ringtone_testing = True
+                self.test_ringtone_btn.setText("Стоп")
+                print("🔔 Тестирование рингтона запущено")
+                
+                # Устанавливаем таймер для автоматического возврата кнопки
+                # после окончания воспроизведения
+                if self.ringtone_channel:
+                    duration = int(self.ringtone.get_length() * 1000)  # в миллисекундах
+                    QTimer.singleShot(duration, self.on_test_ringtone_finished)
+    
+    def on_test_ringtone_finished(self):
+        """Вызывается когда тестовый рингтон закончил воспроизведение"""
+        if self.is_ringtone_testing:
+            self.is_ringtone_testing = False
+            self.test_ringtone_btn.setText("Тест")
+            print("✅ Тестирование рингтона завершено")
 
     def play_ringtone(self):
         """Воспроизведение рингтона в цикле"""
@@ -201,6 +289,11 @@ class SipManagerApp(QMainWindow):
             self.ringtone_channel.stop()
             self.ringtone_channel = None
             print("🔕 Рингтон остановлен")
+        
+        # Сбрасываем флаг и кнопку тестирования если рингтон был в режиме теста
+        if self.is_ringtone_testing:
+            self.is_ringtone_testing = False
+            self.test_ringtone_btn.setText("Тест")
 
     def mute_sipphone(self):
         """Заглушает звук sipphone.exe"""
@@ -319,6 +412,12 @@ class SipManagerApp(QMainWindow):
                 self.test_ringtone_btn.setEnabled(True)
             except Exception as e:
                 print(f"⚠️ Не удалось загрузить сохраненный рингтон: {e}")
+        
+        # Загружаем настройку аварийного сигнала
+        if 'alert_on_close' in config:
+            self.alert_checkbox.setChecked(config['alert_on_close'])
+        else:
+            self.alert_checkbox.setChecked(False)  # По умолчанию выключено
 
     def load_config(self):
         try:
@@ -337,12 +436,13 @@ class SipManagerApp(QMainWindow):
             "speakers": {
                 "name": self.speakers_combo.currentText(),
                 "id": self.speakers_combo.currentData()
-            }
+            },
+            "alert_on_close": self.alert_checkbox.isChecked()
         })
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
         
-        QMessageBox.information(self, "Сохранено", "Настройки аудиоустройств сохранены.")
+        QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
         self.on_call_ended()
 
     def start_monitoring(self):
@@ -352,12 +452,13 @@ class SipManagerApp(QMainWindow):
         self.monitor_thread.process_stopped.connect(self.on_process_stopped)
         self.monitor_thread.process_running.connect(self.on_process_running)
         self.monitor_thread.incoming_call.connect(self.on_incoming_call)
+        self.monitor_thread.outgoing_call.connect(self.on_outgoing_call)
         self.monitor_thread.call_answered.connect(self.on_call_answered)
         self.monitor_thread.start()
 
     def on_incoming_call(self, direction):
-        """Обработка входящего вызова"""
-        print(f"GUI: Входящий вызов - {direction}")
+        """Обработка входящего звонка"""
+        print(f"GUI: Входящий звонок - {direction}")
         
         # КРИТИЧНО: Сначала глушим sipphone
         self.mute_sipphone()
@@ -370,7 +471,7 @@ class SipManagerApp(QMainWindow):
         self.play_ringtone()
         
         # Обновляем GUI с цветовой индикацией направления
-        self.update_status("ringing", "Входящий вызов...")
+        self.update_status("ringing", "Входящий звонок...")
         
         # Устанавливаем цвет в зависимости от направления
         if direction == "tv_tech":
@@ -392,10 +493,26 @@ class SipManagerApp(QMainWindow):
         # Запускаем секундомер
         self.start_timer()
         
+        # Если окно скрыто в трее, показываем его
+        if not self.isVisible():
+            self.show()
+        
         # Активируем окно
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
         self.activateWindow()
         self.raise_()
+
+    def on_outgoing_call(self):
+        """Обработка исходящего звонка"""
+        print("GUI: Исходящий звонок")
+        
+        # При исходящем звонке НЕ воспроизводим рингтон
+        # Сразу переключаем на гарнитуру
+        if audio_manager.set_device_from_config('headset'):
+            self.update_status("headset", "Исходящий звонок\n(Гарнитура)")
+        
+        self.direction_label.setText("Направление: Исходящий")
+        self.direction_label.setStyleSheet("color: #FF9800; font-weight: bold;")  # Оранжевый
 
     def on_call_answered(self):
         """Обработка момента ответа на звонок"""
@@ -447,21 +564,39 @@ class SipManagerApp(QMainWindow):
         self.stop_timer()
         self.update_status("disconnected", "SIP-телефон не найден")
         self.direction_label.setText("Направление: —")
-        self.play_alert()
+        
+        # Воспроизводим аварийный сигнал только если настройка включена
+        if self.alert_checkbox.isChecked():
+            self.play_alert()
 
     def on_process_running(self):
         print("GUI: Получен сигнал 'process_running'")
         self.on_call_ended()
 
     def closeEvent(self, event):
+        """При закрытии окна (X) сворачиваем в трей вместо выхода"""
+        event.ignore()
+        self.hide()
+        self.tray_icon.showMessage(
+            "SIP Helper",
+            "Приложение свернуто в трей. Для выхода используйте контекстное меню.",
+            QSystemTrayIcon.Information,
+            2000
+        )
+        print("🔽 Окно свернуто в трей")
+    
+    def quit_application(self):
+        """Полный выход из приложения"""
+        print("👋 Выход из приложения")
         self.stop_ringtone()
         self.unmute_sipphone()
         self.timer.stop()
         self.blink_timer.stop()
         self.monitor_thread.stop()
-        self.monitor_thread.wait() 
+        self.monitor_thread.wait()
         audio_manager.set_device_from_config('speakers')
-        event.accept()
+        self.tray_icon.hide()
+        QApplication.quit()
 
 def log_uncaught_exceptions(ex_cls, ex, tb):
     """Записывает любую необработанную ошибку в файл."""
