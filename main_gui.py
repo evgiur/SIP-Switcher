@@ -142,6 +142,10 @@ class SipManagerApp(QMainWindow):
         self.alert_checkbox.setChecked(False)  # По умолчанию выключено
         settings_layout.addWidget(self.alert_checkbox)
         
+        self.auto_show_checkbox = QCheckBox("Автоматически показывать окно при входящем звонке")
+        self.auto_show_checkbox.setChecked(True)  # По умолчанию включено
+        settings_layout.addWidget(self.auto_show_checkbox)
+        
         settings_group.setLayout(settings_layout)
         self.layout.addWidget(settings_group)
         
@@ -418,6 +422,12 @@ class SipManagerApp(QMainWindow):
             self.alert_checkbox.setChecked(config['alert_on_close'])
         else:
             self.alert_checkbox.setChecked(False)  # По умолчанию выключено
+        
+        # Загружаем настройку автоматического показа окна
+        if 'auto_show_window' in config:
+            self.auto_show_checkbox.setChecked(config['auto_show_window'])
+        else:
+            self.auto_show_checkbox.setChecked(True)  # По умолчанию включено
 
     def load_config(self):
         try:
@@ -437,7 +447,8 @@ class SipManagerApp(QMainWindow):
                 "name": self.speakers_combo.currentText(),
                 "id": self.speakers_combo.currentData()
             },
-            "alert_on_close": self.alert_checkbox.isChecked()
+            "alert_on_close": self.alert_checkbox.isChecked(),
+            "auto_show_window": self.auto_show_checkbox.isChecked()
         })
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
@@ -493,14 +504,13 @@ class SipManagerApp(QMainWindow):
         # Запускаем секундомер
         self.start_timer()
         
-        # Если окно скрыто в трее, показываем его
-        if not self.isVisible():
+        # Если окно скрыто в трее и включена настройка автоматического показа, показываем его
+        if not self.isVisible() and self.auto_show_checkbox.isChecked():
             self.show()
-        
-        # Активируем окно
-        self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-        self.activateWindow()
-        self.raise_()
+            # Активируем окно
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+            self.activateWindow()
+            self.raise_()
 
     def on_outgoing_call(self):
         """Обработка исходящего звонка"""
